@@ -76,39 +76,41 @@ export default function PointsTablePage() {
           process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
 
         if (hasSupabaseUrl) {
-          if (selectedSport.format_type === "podium_heat") {
-            const { data } = await supabase
-              .from("podium_results")
-              .select(`
-                position,
-                awarded_pts,
-                performance_mark,
-                player:players(id, full_name, roll_no),
-                department:departments(short_code, name, badge_color)
-              `)
-              .eq("sport_id", selectedSport.id)
-              .eq("bracket_gender", selectedBracketGender)
-              .order("position", { ascending: true });
+          // Fetch podium results if available for this sport & bracket gender
+          const { data: podiumData } = await supabase
+            .from("podium_results")
+            .select(`
+              position,
+              awarded_pts,
+              performance_mark,
+              athlete_name,
+              player:players(id, full_name, roll_no),
+              department:departments(short_code, name, badge_color)
+            `)
+            .or(`sport_id.eq.${selectedSport.id},sport_id.eq.${selectedSport.name.toLowerCase()}`)
+            .eq("bracket_gender", selectedBracketGender)
+            .order("position", { ascending: true });
 
-            if (data && data.length > 0) {
-              const mapped: PodiumItem[] = data.map((d: any) => ({
-                position: d.position,
-                medal: d.position === 1 ? "Gold" : d.position === 2 ? "Silver" : "Bronze",
-                pts: d.awarded_pts,
-                athlete_id: d.player?.id || "p-demo",
-                athlete_name: d.player?.full_name || "Athlete",
-                roll_no: d.player?.roll_no || "",
-                department_code: d.department?.short_code || "AITM",
-                department_name: d.department?.name || "Department",
-                badge_color: d.department?.badge_color || "#1E3A8A",
-                performance_mark: d.performance_mark || "N/A",
-              }));
-              setPodiumWinners(mapped);
-            } else {
-              setPodiumWinners(FALLBACK_PODIUM_RESULTS[selectedBracketGender]);
-            }
+          if (podiumData && podiumData.length > 0) {
+            const mapped: PodiumItem[] = podiumData.map((d: any) => ({
+              position: d.position,
+              medal: d.position === 1 ? "Gold" : d.position === 2 ? "Silver" : "Bronze",
+              pts: d.awarded_pts || (d.position === 1 ? 10 : d.position === 2 ? 8 : 5),
+              athlete_id: d.player?.id || "p-podium",
+              athlete_name: d.athlete_name || d.player?.full_name || "Athlete",
+              roll_no: d.player?.roll_no || "",
+              department_code: d.department?.short_code || "AITM",
+              department_name: d.department?.name || "Department",
+              badge_color: d.department?.badge_color || "#1E3A8A",
+              performance_mark: d.performance_mark || "Finalist",
+            }));
+            setPodiumWinners(mapped);
           } else {
-            // League standings
+            setPodiumWinners([]);
+          }
+
+          if (selectedSport.format_type !== "podium_heat") {
+            // League standings for team sports
             const { data } = await supabase
               .from("points_table")
               .select(`
@@ -142,20 +144,16 @@ export default function PointsTablePage() {
               }));
               setLeagueStandings(mapped);
             } else {
-              setLeagueStandings(FALLBACK_LEAGUE_STANDINGS);
+              setLeagueStandings([]);
             }
           }
         } else {
-          // Fallback demo values
-          if (selectedSport.format_type === "podium_heat") {
-            setPodiumWinners(FALLBACK_PODIUM_RESULTS[selectedBracketGender]);
-          } else {
-            setLeagueStandings(FALLBACK_LEAGUE_STANDINGS);
-          }
+          setPodiumWinners([]);
+          setLeagueStandings([]);
         }
       } catch {
-        setLeagueStandings(FALLBACK_LEAGUE_STANDINGS);
-        setPodiumWinners(FALLBACK_PODIUM_RESULTS[selectedBracketGender]);
+        setLeagueStandings([]);
+        setPodiumWinners([]);
       } finally {
         setIsLoading(false);
       }
@@ -396,6 +394,41 @@ export default function PointsTablePage() {
               ))}
             </div>
           </div>
+
+          {/* If finals conclude and medalists are recorded for team sports (e.g. Football, Cricket) */}
+          {podiumWinners.length > 0 && (
+            <div className="p-4 sm:p-5 bg-amber-50/50 border-b border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Medal className="w-5 h-5 text-amber-600 shrink-0" />
+                <div>
+                  <div className="font-extrabold text-sm text-[#0F172A]">
+                    {selectedSport.name} ({selectedBracketGender === "boys" ? "Boys" : "Girls"}) Championship Podium
+                  </div>
+                  <div className="text-xs text-[#475569]">
+                    Official tournament podium: Gold (10 pts), Silver (8 pts), Bronze (5 pts).
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {podiumWinners.map((pw) => (
+                  <span
+                    key={pw.position}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border ${
+                      pw.position === 1
+                        ? "bg-amber-100 text-amber-900 border-amber-300"
+                        : pw.position === 2
+                        ? "bg-slate-100 text-slate-800 border-slate-300"
+                        : "bg-orange-100 text-orange-900 border-orange-300"
+                    }`}
+                  >
+                    <span>{pw.position === 1 ? "🥇 1st" : pw.position === 2 ? "🥈 2nd" : "🥉 3rd"}</span>
+                    <span>{pw.department_code}</span>
+                    <span className="font-mono opacity-80">(+{pw.pts} pts)</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* High Contrast Light Mode Points Table */}
           <div className="overflow-x-auto max-w-full">

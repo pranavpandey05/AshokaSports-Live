@@ -591,21 +591,78 @@ export default function AdminPage() {
     setTimeout(() => setNotification(null), 4000);
   };
 
-  // Save Podium results handler
-  const handleSavePodium = (e: React.FormEvent) => {
+  // Save Podium results handler (Consistent 10 / 8 / 5 points across all sports)
+  const handleSavePodium = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!goldAthlete.trim() || !silverAthlete.trim() || !bronzeAthlete.trim()) {
-      alert("Please fill in athlete names for all three podium positions.");
+      alert("Please fill in athlete / team captain names for all three podium positions.");
       return;
+    }
+
+    const targetSport = sportsList.find(
+      (s) => s.name.toLowerCase() === podiumSport.toLowerCase() || s.id === podiumSport
+    );
+    const sportId = targetSport ? targetSport.id : podiumSport.toLowerCase().replace(/\s+/g, "-");
+
+    const podiumEntries = [
+      {
+        sport_id: sportId,
+        bracket_gender: podiumGender,
+        position: 1,
+        department_id: goldDept,
+        athlete_name: goldAthlete.trim(),
+        mark_metric: goldMark.trim() || null,
+        awarded_pts: 10,
+      },
+      {
+        sport_id: sportId,
+        bracket_gender: podiumGender,
+        position: 2,
+        department_id: silverDept,
+        athlete_name: silverAthlete.trim(),
+        mark_metric: silverMark.trim() || null,
+        awarded_pts: 8,
+      },
+      {
+        sport_id: sportId,
+        bracket_gender: podiumGender,
+        position: 3,
+        department_id: bronzeDept,
+        athlete_name: bronzeAthlete.trim(),
+        mark_metric: bronzeMark.trim() || null,
+        awarded_pts: 5,
+      },
+    ];
+
+    const hasSupabaseUrl =
+      process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
+
+    if (hasSupabaseUrl && navigator.onLine) {
+      try {
+        await (supabase as any).from("podium_results").upsert(podiumEntries, {
+          onConflict: "sport_id,bracket_gender,position",
+        });
+      } catch (err) {
+        console.error("Failed to sync podium results to Supabase:", err);
+      }
     }
 
     addAuditLog(
       "INSERT",
       "podium_results",
-      `Recorded podium for ${podiumSport} (${podiumGender}): 1st ${goldDept} (${goldAthlete} - ${goldMark}), 2nd ${silverDept} (${silverAthlete} - ${silverMark}), 3rd ${bronzeDept} (${bronzeAthlete} - ${bronzeMark})`
+      `Recorded podium for ${podiumSport} (${podiumGender}): 1st ${goldDept} (${goldAthlete} - 10 pts), 2nd ${silverDept} (${silverAthlete} - 8 pts), 3rd ${bronzeDept} (${bronzeAthlete} - 5 pts)`
     );
 
-    setNotification(`Podium results for ${podiumSport} (${podiumGender}) recorded and departmental points updated!`);
+    setNotification(
+      `Podium results for ${podiumSport} (${podiumGender}) recorded! Gold = 10 pts, Silver = 8 pts, Bronze = 5 pts credited to departmental tallies.`
+    );
+    setGoldAthlete("");
+    setGoldMark("");
+    setSilverAthlete("");
+    setSilverMark("");
+    setBronzeAthlete("");
+    setBronzeMark("");
     setTimeout(() => setNotification(null), 5000);
   };
 
@@ -1177,32 +1234,27 @@ export default function AdminPage() {
         <section className="bg-white rounded-xl border border-[#E2E8F0] p-6 sm:p-8 shadow-xs space-y-6">
           <div className="pb-4 border-b border-slate-100">
             <h2 className="text-base sm:text-lg font-extrabold text-[#0F172A]">
-              Record Track & Field / Podium Winners
+              Record Podium Winners & Medal Positions
             </h2>
             <p className="text-xs text-[#475569] mt-0.5">
-              Awards points to department tallies: Gold (10 pts), Silver (8 pts), Bronze (5 pts).
+              Awards points directly to department tallies: Gold (10 pts), Silver (8 pts), Bronze (5 pts) uniformly across all sports including Football and Cricket.
             </p>
           </div>
 
           <form onSubmit={handleSavePodium} className="space-y-6 text-xs">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block font-bold text-[#0F172A] mb-1">Select Event:</label>
+                <label className="block font-bold text-[#0F172A] mb-1">Select Event / Sport:</label>
                 <select
                   value={podiumSport}
                   onChange={(e) => setPodiumSport(e.target.value)}
                   className="w-full h-9 px-3 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] font-bold"
                 >
-                  <option value="100m Sprint">100m Sprint</option>
-                  <option value="200m Race">200m Race</option>
-                  <option value="4x100m Relay">4x100m Relay</option>
-                  <option value="1500m Race">1500m Race</option>
-                  <option value="Long Jump">Long Jump</option>
-                  <option value="High Jump">High Jump</option>
-                  <option value="Shot Put">Shot Put</option>
-                  <option value="Discus Throw">Discus Throw</option>
-                  <option value="Javelin Throw">Javelin Throw</option>
-                  <option value="Tug of War">Tug of War</option>
+                  {sportsList.map((sp) => (
+                    <option key={sp.id} value={sp.name}>
+                      {sp.name} ({sp.category_group === "outdoor" || sp.category_group === "indoor" ? "Team / Match Sport" : "Track & Field"})
+                    </option>
+                  ))}
                 </select>
               </div>
 

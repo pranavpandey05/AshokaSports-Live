@@ -176,10 +176,10 @@ export default function RecordsPage() {
                 03
               </div>
               <h3 className="text-sm font-bold text-[#0F172A]">
-                Podium Championship Points
+                All-Sports Podium Points
               </h3>
               <p className="text-xs text-[#475569] leading-relaxed">
-                Track & Field, Tug of War, and Individual heats award points directly toward the Overall Championship Trophy:
+                Podium finishes across all sports (including Football, Cricket, and Athletics) award uniform points directly toward the Overall Championship Trophy:
                 <strong> 1st (Gold) = 10 pts</strong>, <strong>2nd (Silver) = 8 pts</strong>, and <strong>3rd (Bronze) = 5 pts</strong>.
               </p>
             </div>

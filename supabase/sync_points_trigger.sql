@@ -118,15 +118,22 @@ BEGIN
   END IF;
 
   -- 3. Idempotently recompute total_overall_pts for ALL departments:
-  -- Total = (Sum of league points from points_table) + (Sum of track & field podium points)
-  -- Zero fair-play bonus points.
+  -- Total = (Sum of league points from points_table) + (Sum of podium points: Gold=10, Silver=8, Bronze=5)
+  -- Zero fair-play bonus points. Uniform across all sports including Football & Cricket.
   UPDATE departments d
   SET total_overall_pts = COALESCE((
     SELECT SUM(pt.total_points)
     FROM points_table pt
     WHERE pt.department_id = d.id
   ), 0) + COALESCE((
-    SELECT SUM(pr.awarded_pts)
+    SELECT SUM(
+      CASE 
+        WHEN pr.position = 1 THEN 10
+        WHEN pr.position = 2 THEN 8
+        WHEN pr.position = 3 THEN 5
+        ELSE COALESCE(pr.awarded_pts, 0)
+      END
+    )
     FROM podium_results pr
     WHERE pr.department_id = d.id
   ), 0),
@@ -136,11 +143,27 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- 4. Podium recomputation trigger function
+-- 4. Automatic podium awarded points trigger (Enforces Gold = 10, Silver = 8, Bronze = 5 for all sports)
+CREATE OR REPLACE FUNCTION public.set_podium_awarded_pts()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- Strict uniform podium points: 1st (Gold) = 10, 2nd (Silver) = 8, 3rd (Bronze) = 5
+  NEW.awarded_pts := CASE 
+    WHEN NEW.position = 1 THEN 10
+    WHEN NEW.position = 2 THEN 8
+    WHEN NEW.position = 3 THEN 5
+    ELSE COALESCE(NEW.awarded_pts, 0)
+  END;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 5. Podium recomputation trigger function
 CREATE OR REPLACE FUNCTION public.recalculate_standings_from_podium()
 RETURNS TRIGGER AS $$
 BEGIN
   -- Recompute gold, silver, bronze counts and total_overall_pts for all departments
+  -- Uniform points across all sports: Gold = 10, Silver = 8, Bronze = 5
   UPDATE departments d
   SET gold_count = COALESCE((SELECT COUNT(*) FROM podium_results WHERE department_id = d.id AND position = 1), 0),
       silver_count = COALESCE((SELECT COUNT(*) FROM podium_results WHERE department_id = d.id AND position = 2), 0),
@@ -150,7 +173,14 @@ BEGIN
         FROM points_table pt
         WHERE pt.department_id = d.id
       ), 0) + COALESCE((
-        SELECT SUM(pr.awarded_pts)
+        SELECT SUM(
+          CASE 
+            WHEN pr.position = 1 THEN 10
+            WHEN pr.position = 2 THEN 8
+            WHEN pr.position = 3 THEN 5
+            ELSE COALESCE(pr.awarded_pts, 0)
+          END
+        )
         FROM podium_results pr
         WHERE pr.department_id = d.id
       ), 0),
@@ -160,13 +190,21 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- 5. Attach Triggers
+-- 6. Attach Triggers
 DROP TRIGGER IF EXISTS trigger_sync_match_standings ON matches;
 CREATE TRIGGER trigger_sync_match_standings
 AFTER INSERT OR UPDATE OR DELETE ON matches
 FOR EACH ROW
 EXECUTE FUNCTION public.recalculate_standings_from_matches();
 
+-- Enforce 10 / 8 / 5 awarded points BEFORE insert or update on podium_results
+DROP TRIGGER IF EXISTS trigger_set_podium_awarded_pts ON podium_results;
+CREATE TRIGGER trigger_set_podium_awarded_pts
+BEFORE INSERT OR UPDATE ON podium_results
+FOR EACH ROW
+EXECUTE FUNCTION public.set_podium_awarded_pts();
+
+-- Recompute department tallies AFTER changes on podium_results
 DROP TRIGGER IF EXISTS trigger_apply_podium_points ON podium_results;
 DROP TRIGGER IF EXISTS trigger_sync_podium_standings ON podium_results;
 CREATE TRIGGER trigger_sync_podium_standings

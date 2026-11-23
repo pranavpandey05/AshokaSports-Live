@@ -19,7 +19,7 @@ const NOTICES = [
   {
     id: "notice-3",
     ref: "Scoring Weightage",
-    text: "Track & Field Podium Points: 1st (Gold) = 10 pts, 2nd (Silver) = 8 pts, 3rd (Bronze) = 5 pts.",
+    text: "All-Sports Medal Points: 1st (Gold) = 10 pts, 2nd (Silver) = 8 pts, 3rd (Bronze) = 5 pts across all sports (including Football & Cricket).",
     tag: "Championship Rules",
   },
 ];
