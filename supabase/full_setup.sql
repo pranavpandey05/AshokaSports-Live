@@ -465,7 +465,8 @@ BEGIN
     FROM podium_results pr
     WHERE pr.department_id = d.id
   ), 0),
-  updated_at = now();
+  updated_at = now()
+  WHERE d.id IS NOT NULL;
 
   RETURN NULL;
 END;
@@ -488,7 +489,8 @@ BEGIN
         FROM podium_results pr
         WHERE pr.department_id = d.id
       ), 0),
-      updated_at = now();
+      updated_at = now()
+  WHERE d.id IS NOT NULL;
 
   RETURN NULL;
 END;

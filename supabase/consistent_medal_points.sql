@@ -18,7 +18,8 @@
 UPDATE public.sports
 SET podium_1st_pts = 10,
     podium_2nd_pts = 8,
-    podium_3rd_pts = 5;
+    podium_3rd_pts = 5
+WHERE id IS NOT NULL;
 
 -- 2. Retroactively fix any existing rows in public.podium_results to 10 / 8 / 5
 UPDATE public.podium_results
@@ -27,7 +28,8 @@ SET awarded_pts = CASE
   WHEN position = 2 THEN 8
   WHEN position = 3 THEN 5
   ELSE COALESCE(awarded_pts, 0)
-END;
+END
+WHERE id IS NOT NULL;
 
 -- 3. Trigger Function: Automatically set awarded_pts on BEFORE INSERT OR UPDATE on podium_results
 CREATE OR REPLACE FUNCTION public.set_podium_awarded_pts()
@@ -73,7 +75,8 @@ BEGIN
         FROM public.podium_results pr
         WHERE pr.department_id = d.id
       ), 0),
-      updated_at = now();
+      updated_at = now()
+  WHERE d.id IS NOT NULL;
 
   RETURN NULL;
 END;
@@ -189,7 +192,8 @@ BEGIN
     FROM public.podium_results pr
     WHERE pr.department_id = d.id
   ), 0),
-  updated_at = now();
+  updated_at = now()
+  WHERE d.id IS NOT NULL;
 
   RETURN NULL;
 END;
@@ -222,4 +226,5 @@ SET gold_count = COALESCE((SELECT COUNT(*) FROM public.podium_results WHERE depa
       FROM public.podium_results pr
       WHERE pr.department_id = d.id
     ), 0),
-    updated_at = now();
+    updated_at = now()
+WHERE d.id IS NOT NULL;

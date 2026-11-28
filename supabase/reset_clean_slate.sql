@@ -14,13 +14,13 @@
 BEGIN;
 
 -- 1. Remove all match-related statistics, lineups, and match entries
-DELETE FROM public.match_player_stats;
-DELETE FROM public.match_lineups;
-DELETE FROM public.matches;
+DELETE FROM public.match_player_stats WHERE id IS NOT NULL;
+DELETE FROM public.match_lineups WHERE id IS NOT NULL;
+DELETE FROM public.matches WHERE id IS NOT NULL;
 
 -- 2. Remove all event podium results and sport points table standings
-DELETE FROM public.podium_results;
-DELETE FROM public.points_table;
+DELETE FROM public.podium_results WHERE id IS NOT NULL;
+DELETE FROM public.points_table WHERE id IS NOT NULL;
 
 -- 3. Safely remove deprecated Fair Play columns if they exist
 DO $$
@@ -46,7 +46,8 @@ SET
   gold_count = 0,
   silver_count = 0,
   bronze_count = 0,
-  total_overall_pts = 0;
+  total_overall_pts = 0
+WHERE id IS NOT NULL;
 
 -- 5. Ensure all 14 official AITM departments exist with exact coordinators & colors
 INSERT INTO public.departments (id, name, short_code, coordinator_name, badge_color, gold_count, silver_count, bronze_count, total_overall_pts)
