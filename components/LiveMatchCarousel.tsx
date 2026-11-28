@@ -51,7 +51,7 @@ export function LiveMatchCarousel() {
         return;
       }
 
-      // Fetch live matches and next upcoming matches
+      // Fetch live matches and next upcoming matches (live prioritized first)
       const { data, error } = await supabase
         .from("matches")
         .select(`
@@ -68,36 +68,54 @@ export function LiveMatchCarousel() {
           team_b:departments!matches_team_b_id_fkey(short_code, name, badge_color)
         `)
         .in("status", ["live", "scheduled"])
-        .order("status", { ascending: false }) // 'live' first
+        .order("status", { ascending: true }) // 'live' < 'scheduled' alphabetically
         .order("scheduled_at", { ascending: true })
-        .limit(9);
+        .limit(20);
 
-      if (!error && data && data.length > 0) {
-        const formatted: CarouselMatch[] = data.map((m: any) => ({
-          id: m.id,
-          status: m.status,
-          sport_name: m.sport?.name || "Sport",
-          bracket_gender: m.bracket_gender || "boys",
-          stage_label: m.stage_label || "Group Match",
-          team_a_code: m.team_a?.short_code || "TBD",
-          team_a_name: m.team_a?.name || "Team A",
-          team_a_color: m.team_a?.badge_color || "#1E3A8A",
-          team_a_score: m.team_a_score ?? (m.status === "live" ? "0" : "-"),
-          team_b_code: m.team_b?.short_code || "TBD",
-          team_b_name: m.team_b?.name || "Team B",
-          team_b_color: m.team_b?.badge_color || "#DC2626",
-          team_b_score: m.team_b_score ?? (m.status === "live" ? "0" : "-"),
-          venue: m.venue || "AITM Campus Ground",
-          scheduled_time: new Date(m.scheduled_at).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
-        }));
+      if (error) {
+        console.error("LiveMatchCarousel failed to fetch matches:", error);
+        setMatches(FALLBACK_MATCHES);
+        return;
+      }
+
+      if (data && data.length > 0) {
+        const formatted: CarouselMatch[] = data
+          .map((m: any) => ({
+            id: m.id,
+            status: m.status,
+            sport_name: m.sport?.name || "Sport",
+            bracket_gender: m.bracket_gender || "boys",
+            stage_label: m.stage_label || "Group Match",
+            team_a_code: m.team_a?.short_code || "TBD",
+            team_a_name: m.team_a?.name || "Team A",
+            team_a_color: m.team_a?.badge_color || "#1E3A8A",
+            team_a_score: m.team_a_score ?? (m.status === "live" ? "0" : "-"),
+            team_b_code: m.team_b?.short_code || "TBD",
+            team_b_name: m.team_b?.name || "Team B",
+            team_b_color: m.team_b?.badge_color || "#DC2626",
+            team_b_score: m.team_b_score ?? (m.status === "live" ? "0" : "-"),
+            venue: m.venue || "AITM Campus Ground",
+            scheduled_time: m.scheduled_at
+              ? new Date(m.scheduled_at).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })
+              : "TBD",
+            _sortTs: m.scheduled_at ? new Date(m.scheduled_at).getTime() : 0,
+          }))
+          .sort((a: any, b: any) => {
+            const rankA = a.status === "live" ? 0 : 1;
+            const rankB = b.status === "live" ? 0 : 1;
+            if (rankA !== rankB) return rankA - rankB;
+            return a._sortTs - b._sortTs;
+          })
+          .slice(0, 12);
         setMatches(formatted);
       } else {
         setMatches(FALLBACK_MATCHES);
       }
-    } catch {
+    } catch (err) {
+      console.error("LiveMatchCarousel unexpected error:", err);
       setMatches(FALLBACK_MATCHES);
     }
   };
@@ -106,24 +124,35 @@ export function LiveMatchCarousel() {
     fetchMatches();
 
     // Subscribe to Supabase Realtime changes on matches table
+    let channel: any = null;
     try {
-      const channel = supabase
-        .channel("matches-live-carousel")
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "matches" },
-          () => {
-            fetchMatches();
-          }
-        )
-        .subscribe();
+      const hasSupabaseUrl =
+        process.env.NEXT_PUBLIC_SUPABASE_URL &&
+        process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
 
-      return () => {
-        supabase.removeChannel(channel);
-      };
+      if (hasSupabaseUrl) {
+        channel = supabase
+          .channel("matches-live-carousel")
+          .on(
+            "postgres_changes",
+            { event: "*", schema: "public", table: "matches" },
+            () => {
+              fetchMatches();
+            }
+          )
+          .subscribe();
+      }
     } catch {
       // Ignore websocket errors if offline
     }
+
+    return () => {
+      if (channel) {
+        try {
+          supabase.removeChannel(channel);
+        } catch {}
+      }
+    };
   }, []);
 
   const scroll = (direction: "left" | "right") => {

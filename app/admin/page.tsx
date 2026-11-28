@@ -25,6 +25,7 @@ import {
   X,
   ChevronRight,
   AlertTriangle,
+  Trash2,
 } from "lucide-react";
 import { AITM_DEPARTMENTS } from "@/lib/constants/departments";
 import { AITM_SPORTS } from "@/lib/constants/sports";
@@ -69,20 +70,104 @@ interface AuditLogDisplay {
 
 const INITIAL_AUDIT_LOGS: AuditLogDisplay[] = [];
 
+function getDefaultLocalDateTime(): string {
+  const now = new Date();
+  const offsetMs = now.getTimezoneOffset() * 60000;
+  return new Date(now.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
 export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<"fixtures" | "add_sport" | "podium" | "approvals" | "audit">("fixtures");
   const [notification, setNotification] = useState<string | null>(null);
+  const [errorNotification, setErrorNotification] = useState<string | null>(null);
 
   // Auth & 3-Tier Approval State
   const [currentUserRole, setCurrentUserRole] = useState<"super_admin" | "admin">("super_admin");
   const [currentUserName, setCurrentUserName] = useState<string>("Mr. Pankaj Kr. Srivastava (SAC Convenor)");
   const [isAuthorized, setIsAuthorized] = useState<boolean>(true);
+  const [hasAuthSession, setHasAuthSession] = useState<boolean | null>(null);
   const [officialsList, setOfficialsList] = useState<OfficialRoleItem[]>([]);
   const [isLoadingOfficials, setIsLoadingOfficials] = useState<boolean>(true);
 
-  // Sync auth session & live user_roles
+  // Canonical DB lookup maps for departments & sports
+  const [deptIdByCode, setDeptIdByCode] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    for (const d of AITM_DEPARTMENTS) {
+      initial[d.code.toUpperCase()] = `dept-${d.code.toLowerCase().replace(/\./g, "")}`;
+    }
+    return initial;
+  });
+
+  // Sports list state (synced with Supabase + AITM_SPORTS fallback)
+  const [sportsList, setSportsList] = useState<Sport[]>(AITM_SPORTS);
+
+  // Fixtures state (empty slate - populated from Supabase or created by Admin)
+  const [fixturesList, setFixturesList] = useState<AdminMatchItem[]>([]);
+  const [isLoadingFixtures, setIsLoadingFixtures] = useState<boolean>(true);
+  const [isCreatingFixture, setIsCreatingFixture] = useState<boolean>(false);
+
+  // Fixture creation form state
+  const [fixSportName, setFixSportName] = useState(AITM_SPORTS[0].name);
+  const [fixBracketGender, setFixBracketGender] = useState<"boys" | "girls">("boys");
+  const [fixTeamA, setFixTeamA] = useState("CSE");
+  const [fixTeamB, setFixTeamB] = useState("ME");
+  const [fixStage, setFixStage] = useState("Pool A");
+  const [fixVenue, setFixVenue] = useState("Main Campus Ground, Pitch #1");
+  const [fixDateTime, setFixDateTime] = useState<string>(() => getDefaultLocalDateTime());
+  const [fixInitialStatus, setFixInitialStatus] = useState<"scheduled" | "live">("scheduled");
+
+  // Add Sport Form state
+  const [newSportName, setNewSportName] = useState("");
+  const [newSportCategory, setNewSportCategory] = useState<"indoor" | "outdoor" | "track" | "field">("outdoor");
+  const [newSportGender, setNewSportGender] = useState<"boys" | "girls" | "both">("both");
+  const [newSportFormat, setNewSportFormat] = useState<"team_match" | "singles_doubles" | "podium_heat">("team_match");
+  const [newSportScoringUnit, setNewSportScoringUnit] = useState("goals");
+  const [newSportWinPts, setNewSportWinPts] = useState(3);
+  const [newSportDrawPts, setNewSportDrawPts] = useState(1);
+  const [newSportLossPts, setNewSportLossPts] = useState(0);
+  const [newSportPodium1st, setNewSportPodium1st] = useState(10);
+  const [newSportPodium2nd, setNewSportPodium2nd] = useState(8);
+  const [newSportPodium3rd, setNewSportPodium3rd] = useState(5);
+  const [newSportSquadSize, setNewSportSquadSize] = useState(11);
+  const [newSportBenchSize, setNewSportBenchSize] = useState(4);
+  const [newSportReportingMins, setNewSportReportingMins] = useState(15);
+  const [newSportRulesSummary, setNewSportRulesSummary] = useState("");
+
+  // Podium Entry state
+  const [podiumSport, setPodiumSport] = useState("100m Sprint");
+  const [podiumGender, setPodiumGender] = useState<"boys" | "girls">("boys");
+  const [goldDept, setGoldDept] = useState("CSE");
+  const [goldAthlete, setGoldAthlete] = useState("");
+  const [goldMark, setGoldMark] = useState("");
+  const [silverDept, setSilverDept] = useState("ME");
+  const [silverAthlete, setSilverAthlete] = useState("");
+  const [silverMark, setSilverMark] = useState("");
+  const [bronzeDept, setBronzeDept] = useState("ECE");
+  const [bronzeAthlete, setBronzeAthlete] = useState("");
+  const [bronzeMark, setBronzeMark] = useState("");
+
+  // Audit logs state
+  const [auditLogs, setAuditLogs] = useState<AuditLogDisplay[]>(INITIAL_AUDIT_LOGS);
+
+  const showError = (msg: string) => {
+    setErrorNotification(msg);
+    setTimeout(() => setErrorNotification(null), 8000);
+  };
+
+  const showSuccess = (msg: string) => {
+    setErrorNotification(null);
+    setNotification(msg);
+    setTimeout(() => setNotification(null), 5000);
+  };
+
+  // Sync auth session, departments, sports, user_roles, fixtures & audit logs
   useEffect(() => {
     let roleChannel: any = null;
+    let matchesChannel: any = null;
+
+    const hasSupabaseUrl =
+      !!process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
 
     if (typeof window !== "undefined") {
       const storedRole = localStorage.getItem("ashoka_auth_role");
@@ -96,12 +181,67 @@ export default function AdminPage() {
       }
     }
 
-    // Attempt Supabase fetch
+    async function verifySupabaseSession() {
+      if (!hasSupabaseUrl) {
+        setHasAuthSession(false);
+        return;
+      }
+      try {
+        const { data } = await supabase.auth.getSession();
+        const sessionUser = data?.session?.user || null;
+        setHasAuthSession(!!sessionUser);
+
+        if (sessionUser) {
+          const { data: roleRow } = await (supabase as any)
+            .from("user_roles")
+            .select("role, approval_status, full_name")
+            .or(`user_id.eq.${sessionUser.id},email.eq.${sessionUser.email}`)
+            .eq("approval_status", "approved")
+            .maybeSingle();
+
+          if (roleRow) {
+            if (roleRow.role === "super_admin" || roleRow.role === "admin") {
+              setCurrentUserRole(roleRow.role);
+              if (roleRow.full_name) setCurrentUserName(roleRow.full_name);
+              setIsAuthorized(true);
+            } else if (roleRow.role === "scorer") {
+              setIsAuthorized(false);
+            }
+          }
+        }
+      } catch {
+        setHasAuthSession(false);
+      }
+    }
+
+    async function fetchCloudLookups() {
+      if (!hasSupabaseUrl || !navigator.onLine) return;
+      try {
+        const [{ data: deptsData }, { data: sportsData }] = await Promise.all([
+          (supabase as any).from("departments").select("id, short_code"),
+          (supabase as any).from("sports").select("*").order("name", { ascending: true }),
+        ]);
+
+        if (deptsData && deptsData.length > 0) {
+          const map: Record<string, string> = {};
+          for (const d of deptsData) {
+            if (d.short_code && d.id) {
+              map[String(d.short_code).toUpperCase()] = d.id;
+            }
+          }
+          setDeptIdByCode((prev) => ({ ...prev, ...map }));
+        }
+
+        if (sportsData && sportsData.length > 0) {
+          setSportsList(sportsData);
+        }
+      } catch (err) {
+        console.warn("Could not load Supabase departments/sports lookups:", err);
+      }
+    }
+
     async function fetchCloudUserRoles() {
       setIsLoadingOfficials(true);
-      const hasSupabaseUrl =
-        process.env.NEXT_PUBLIC_SUPABASE_URL &&
-        process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
       if (hasSupabaseUrl && navigator.onLine) {
         try {
           const { data, error } = await (supabase as any)
@@ -138,7 +278,6 @@ export default function AdminPage() {
           setIsLoadingOfficials(false);
         }
       } else {
-        // Fallback for offline demo mode
         try {
           const localRequests = JSON.parse(
             localStorage.getItem("ashoka_local_role_requests") || "[]"
@@ -151,12 +290,111 @@ export default function AdminPage() {
         }
       }
     }
+
+    async function fetchCloudFixtures() {
+      if (!hasSupabaseUrl || !navigator.onLine) {
+        setIsLoadingFixtures(false);
+        return;
+      }
+      setIsLoadingFixtures(true);
+      try {
+        const { data, error } = await (supabase as any)
+          .from("matches")
+          .select(`
+            id,
+            bracket_gender,
+            stage_label,
+            venue,
+            scheduled_at,
+            status,
+            is_locked,
+            sport:sports(name),
+            team_a:departments!matches_team_a_id_fkey(short_code),
+            team_b:departments!matches_team_b_id_fkey(short_code)
+          `)
+          .order("scheduled_at", { ascending: false });
+
+        if (error) {
+          console.error("Failed to fetch fixtures from Supabase:", error);
+          setErrorNotification(`Unable to load fixtures from Supabase: ${error.message}`);
+        } else if (data) {
+          setFixturesList(
+            data.map((m: any) => ({
+              id: m.id,
+              sport_name: m.sport?.name || "Sport",
+              bracket_gender: m.bracket_gender,
+              stage_label: m.stage_label || "Round 1",
+              team_a_code: m.team_a?.short_code || "TBD",
+              team_b_code: m.team_b?.short_code || "TBD",
+              venue: m.venue || "Campus Ground",
+              scheduled_at: m.scheduled_at
+                ? new Date(m.scheduled_at).toLocaleDateString() +
+                  " " +
+                  new Date(m.scheduled_at).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })
+                : "TBD",
+              status: m.status,
+              is_locked: !!m.is_locked,
+            }))
+          );
+        }
+      } catch (err: any) {
+        console.error("Unexpected error fetching fixtures:", err);
+      } finally {
+        setIsLoadingFixtures(false);
+      }
+    }
+
+    async function fetchCloudAuditLogs() {
+      if (!hasSupabaseUrl || !navigator.onLine) return;
+      try {
+        const { data, error } = await (supabase as any)
+          .from("audit_logs")
+          .select("*")
+          .order("timestamp", { ascending: false })
+          .limit(50);
+        if (!error && data && data.length > 0) {
+          setAuditLogs(
+            data.map((l: any) => {
+              const rawTime = l.timestamp || l.created_at;
+              let detailsText = "";
+              if (typeof l.details === "string") {
+                detailsText = l.details;
+              } else if (l.new_data && typeof l.new_data === "object") {
+                detailsText = l.new_data.details || JSON.stringify(l.new_data);
+              } else if (l.payload) {
+                detailsText = typeof l.payload === "string" ? l.payload : JSON.stringify(l.payload);
+              }
+              return {
+                id: l.id,
+                timestamp: rawTime
+                  ? new Date(rawTime).toLocaleDateString() +
+                    " " +
+                    new Date(rawTime).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })
+                  : "Recent",
+                action: l.action || "AUDIT",
+                table_name: l.table_name || "system",
+                performed_by: l.performed_by || "System",
+                details: detailsText,
+              };
+            })
+          );
+        }
+      } catch {}
+    }
+
+    verifySupabaseSession();
+    fetchCloudLookups();
     fetchCloudUserRoles();
+    fetchCloudFixtures();
+    fetchCloudAuditLogs();
 
     try {
-      const hasSupabaseUrl =
-        process.env.NEXT_PUBLIC_SUPABASE_URL &&
-        process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
       if (hasSupabaseUrl) {
         roleChannel = supabase
           .channel("admin-user-roles-realtime")
@@ -165,6 +403,17 @@ export default function AdminPage() {
             { event: "*", schema: "public", table: "user_roles" },
             () => {
               fetchCloudUserRoles();
+            }
+          )
+          .subscribe();
+
+        matchesChannel = supabase
+          .channel("admin-matches-realtime")
+          .on(
+            "postgres_changes",
+            { event: "*", schema: "public", table: "matches" },
+            () => {
+              fetchCloudFixtures();
             }
           )
           .subscribe();
@@ -177,93 +426,12 @@ export default function AdminPage() {
           supabase.removeChannel(roleChannel);
         } catch {}
       }
+      if (matchesChannel) {
+        try {
+          supabase.removeChannel(matchesChannel);
+        } catch {}
+      }
     };
-
-    // Fetch fixtures from Supabase
-    async function fetchCloudFixtures() {
-      const hasSupabaseUrl =
-        process.env.NEXT_PUBLIC_SUPABASE_URL &&
-        process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
-      if (hasSupabaseUrl && navigator.onLine) {
-        try {
-          const { data, error } = await (supabase as any)
-            .from("matches")
-            .select(`
-              id,
-              bracket_gender,
-              stage_label,
-              venue,
-              scheduled_at,
-              status,
-              is_locked,
-              sport:sports(name),
-              team_a:departments!matches_team_a_id_fkey(short_code),
-              team_b:departments!matches_team_b_id_fkey(short_code)
-            `)
-            .order("scheduled_at", { ascending: true });
-          if (!error && data && data.length > 0) {
-            setFixturesList(
-              data.map((m: any) => ({
-                id: m.id,
-                sport_name: m.sport?.name || "Sport",
-                bracket_gender: m.bracket_gender,
-                stage_label: m.stage_label || "Round 1",
-                team_a_code: m.team_a?.short_code || "TBD",
-                team_b_code: m.team_b?.short_code || "TBD",
-                venue: m.venue || "Campus Ground",
-                scheduled_at: m.scheduled_at
-                  ? new Date(m.scheduled_at).toLocaleDateString() +
-                    " " +
-                    new Date(m.scheduled_at).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })
-                  : "TBD",
-                status: m.status,
-                is_locked: !!m.is_locked,
-              }))
-            );
-          }
-        } catch {}
-      }
-    }
-    fetchCloudFixtures();
-
-    // Fetch audit logs from Supabase
-    async function fetchCloudAuditLogs() {
-      const hasSupabaseUrl =
-        process.env.NEXT_PUBLIC_SUPABASE_URL &&
-        process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
-      if (hasSupabaseUrl && navigator.onLine) {
-        try {
-          const { data, error } = await (supabase as any)
-            .from("audit_logs")
-            .select("*")
-            .order("created_at", { ascending: false })
-            .limit(50);
-          if (!error && data && data.length > 0) {
-            setAuditLogs(
-              data.map((l: any) => ({
-                id: l.id,
-                timestamp: l.created_at
-                  ? new Date(l.created_at).toLocaleDateString() +
-                    " " +
-                    new Date(l.created_at).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })
-                  : "Recent",
-                action: l.action || "AUDIT",
-                table_name: l.table_name || "system",
-                performed_by: l.performed_by || "System",
-                details: l.details || (typeof l.payload === "string" ? l.payload : JSON.stringify(l.payload || "")),
-              }))
-            );
-          }
-        } catch {}
-      }
-    }
-    fetchCloudAuditLogs();
   }, []);
 
   // Quick switch role in Demo mode
@@ -283,68 +451,41 @@ export default function AdminPage() {
         ? "Mr. Pankaj Kr. Srivastava (SAC Convenor)"
         : "Prof. Arvind Kumar (CSE Coordinator)"
     );
-    setNotification(`Switched demo view to: ${newRole.toUpperCase()}`);
-    setTimeout(() => setNotification(null), 3000);
+    showSuccess(`Switched demo view to: ${newRole.toUpperCase()}`);
   };
 
-  // Sports list state
-  const [sportsList, setSportsList] = useState<Sport[]>(AITM_SPORTS);
-
-  // Fixtures state (empty slate - populated from Supabase or created by Admin)
-  const [fixturesList, setFixturesList] = useState<AdminMatchItem[]>([]);
-
-  // Fixture creation form state
-  const [fixSportName, setFixSportName] = useState(AITM_SPORTS[0].name);
-  const [fixBracketGender, setFixBracketGender] = useState<"boys" | "girls">("boys");
-  const [fixTeamA, setFixTeamA] = useState("CSE");
-  const [fixTeamB, setFixTeamB] = useState("ME");
-  const [fixStage, setFixStage] = useState("Pool A");
-  const [fixVenue, setFixVenue] = useState("Main Campus Ground, Pitch #1");
-  const [fixDateTime, setFixDateTime] = useState("2026-11-23 11:00");
-
-  // Add Sport Form state
-  const [newSportName, setNewSportName] = useState("");
-  const [newSportCategory, setNewSportCategory] = useState<"indoor" | "outdoor" | "track" | "field">("outdoor");
-  const [newSportGender, setNewSportGender] = useState<"boys" | "girls" | "both">("both");
-  const [newSportFormat, setNewSportFormat] = useState<"team_match" | "singles_doubles" | "podium_heat">("team_match");
-  const [newSportScoringUnit, setNewSportScoringUnit] = useState("goals");
-  const [newSportWinPts, setNewSportWinPts] = useState(3);
-  const [newSportDrawPts, setNewSportDrawPts] = useState(1);
-  const [newSportLossPts, setNewSportLossPts] = useState(0);
-  const [newSportPodium1st, setNewSportPodium1st] = useState(10);
-  const [newSportPodium2nd, setNewSportPodium2nd] = useState(8);
-  const [newSportPodium3rd, setNewSportPodium3rd] = useState(5);
-  const [newSportSquadSize, setNewSportSquadSize] = useState(11);
-  const [newSportBenchSize, setNewSportBenchSize] = useState(4);
-  const [newSportReportingMins, setNewSportReportingMins] = useState(15);
-  const [newSportRulesSummary, setNewSportRulesSummary] = useState("");
-
-  // Podium Entry state
-  const [podiumSport, setPodiumSport] = useState("100m Sprint");
-  const [podiumGender, setPodiumGender] = useState<"boys" | "girls">("boys");
-  const [goldDept, setGoldDept] = useState("CSE");
-  const [goldAthlete, setGoldAthlete] = useState("");
-  const [goldMark, setGoldMark] = useState("");
-  const [silverDept, setSilverDept] = useState("ME");
-  const [silverAthlete, setSilverAthlete] = useState("");
-  const [silverMark, setSilverMark] = useState("");
-  const [bronzeDept, setBronzeDept] = useState("ECE");
-  const [bronzeAthlete, setBronzeAthlete] = useState("");
-  const [bronzeMark, setBronzeMark] = useState("");
-
-  // Audit logs state
-  const [auditLogs, setAuditLogs] = useState<AuditLogDisplay[]>(INITIAL_AUDIT_LOGS);
-
-  const addAuditLog = (action: string, table: string, details: string) => {
+  const addAuditLog = async (
+    action: string,
+    table: string,
+    details: string,
+    recordId: string = "manual"
+  ) => {
+    const performer = `${currentUserRole === "super_admin" ? "super_admin" : "admin"} (${currentUserName})`;
     const newLog: AuditLogDisplay = {
       id: `log-${Date.now()}`,
       timestamp: new Date().toLocaleString(),
       action,
       table_name: table,
-      performed_by: `${currentUserRole === "super_admin" ? "super_admin" : "admin"} (${currentUserName})`,
+      performed_by: performer,
       details,
     };
     setAuditLogs((prev) => [newLog, ...prev]);
+
+    const hasSupabaseUrl =
+      process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
+
+    if (hasSupabaseUrl && navigator.onLine) {
+      try {
+        await (supabase as any).from("audit_logs").insert({
+          table_name: table,
+          record_id: recordId,
+          action,
+          performed_by: performer,
+          new_data: { details },
+        });
+      } catch {}
+    }
   };
 
   // Handle Approve Role (Super Admin can approve Admin/Scorer; Admin can approve Scorer only)
@@ -464,109 +605,260 @@ export default function AdminPage() {
     setTimeout(() => setNotification(null), 4000);
   };
 
-  // Create fixture handler
-  const handleCreateFixture = (e: React.FormEvent) => {
+  // Create fixture handler (persists directly to Supabase public.matches)
+  const handleCreateFixture = async (e: React.FormEvent) => {
     e.preventDefault();
     if (fixTeamA === fixTeamB) {
-      alert("Team A and Team B must be different departments!");
+      showError("Team A and Team B must be different departments!");
       return;
     }
 
-    const newFix: AdminMatchItem = {
-      id: `fix-${Date.now()}`,
-      sport_name: fixSportName,
-      bracket_gender: fixBracketGender,
-      stage_label: fixStage,
-      team_a_code: fixTeamA,
-      team_b_code: fixTeamB,
-      venue: fixVenue,
-      scheduled_at: fixDateTime,
-      status: "scheduled",
-      is_locked: false,
-    };
+    const parsedDate = new Date(
+      fixDateTime.includes("T") ? fixDateTime : fixDateTime.replace(" ", "T")
+    );
+    if (isNaN(parsedDate.getTime())) {
+      showError("Please enter a valid scheduled date & time.");
+      return;
+    }
 
-    setFixturesList((prev) => [newFix, ...prev]);
-    addAuditLog("INSERT", "matches", `Created new fixture: ${fixSportName} (${fixBracketGender}) ${fixTeamA} vs ${fixTeamB}`);
-    setNotification(`Fixture created: ${fixTeamA} vs ${fixTeamB} (${fixSportName}) scheduled successfully!`);
-    setTimeout(() => setNotification(null), 4000);
+    const hasSupabaseUrl =
+      process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
+
+    if (!hasSupabaseUrl || !navigator.onLine) {
+      showError("Cannot publish fixture: Supabase URL is not configured or device is offline.");
+      return;
+    }
+
+    setIsCreatingFixture(true);
+    setErrorNotification(null);
+
+    try {
+      const targetSport = sportsList.find(
+        (s) => s.name.toLowerCase() === fixSportName.toLowerCase() || s.id === fixSportName
+      );
+      const resolvedSportId = targetSport
+        ? targetSport.id
+        : `sport-${fixSportName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+
+      const teamAId =
+        deptIdByCode[fixTeamA.toUpperCase()] ||
+        `dept-${fixTeamA.toLowerCase().replace(/\./g, "")}`;
+      const teamBId =
+        deptIdByCode[fixTeamB.toUpperCase()] ||
+        `dept-${fixTeamB.toLowerCase().replace(/\./g, "")}`;
+
+      const { data: insertedMatch, error } = await (supabase as any)
+        .from("matches")
+        .insert({
+          sport_id: resolvedSportId,
+          bracket_gender: fixBracketGender,
+          stage_label: fixStage.trim() || "League Match",
+          team_a_id: teamAId,
+          team_b_id: teamBId,
+          venue: fixVenue.trim() || "Main Campus Ground",
+          scheduled_at: parsedDate.toISOString(),
+          status: fixInitialStatus,
+          team_a_score: "0",
+          team_b_score: "0",
+          is_locked: false,
+        })
+        .select(`
+          id,
+          bracket_gender,
+          stage_label,
+          venue,
+          scheduled_at,
+          status,
+          is_locked,
+          sport:sports(name),
+          team_a:departments!matches_team_a_id_fkey(short_code),
+          team_b:departments!matches_team_b_id_fkey(short_code)
+        `)
+        .single();
+
+      if (error) {
+        console.error("Supabase match insert error:", error);
+        if (
+          error.code === "42501" ||
+          String(error.message || "").toLowerCase().includes("row-level security")
+        ) {
+          showError(
+            "Database permission denied (RLS): Please sign in via Official Login (/login) with an approved Super Admin / Admin account, and verify your role in Supabase user_roles."
+          );
+        } else if (error.code === "23503") {
+          showError(
+            `Database reference error (${error.message}). Please ensure sports and departments tables are initialized in Supabase.`
+          );
+        } else {
+          showError(`Failed to save fixture to Supabase: ${error.message}`);
+        }
+        return;
+      }
+
+      if (insertedMatch) {
+        const createdItem: AdminMatchItem = {
+          id: insertedMatch.id,
+          sport_name: insertedMatch.sport?.name || fixSportName,
+          bracket_gender: insertedMatch.bracket_gender,
+          stage_label: insertedMatch.stage_label || fixStage,
+          team_a_code: insertedMatch.team_a?.short_code || fixTeamA,
+          team_b_code: insertedMatch.team_b?.short_code || fixTeamB,
+          venue: insertedMatch.venue || fixVenue,
+          scheduled_at: insertedMatch.scheduled_at
+            ? new Date(insertedMatch.scheduled_at).toLocaleDateString() +
+              " " +
+              new Date(insertedMatch.scheduled_at).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : fixDateTime,
+          status: insertedMatch.status,
+          is_locked: !!insertedMatch.is_locked,
+        };
+
+        setFixturesList((prev) => {
+          const exists = prev.some((item) => item.id === createdItem.id);
+          return exists ? prev : [createdItem, ...prev];
+        });
+
+        await addAuditLog(
+          "INSERT",
+          "matches",
+          `Created ${fixInitialStatus.toUpperCase()} fixture: ${fixSportName} (${fixBracketGender}) ${fixTeamA} vs ${fixTeamB}`,
+          insertedMatch.id
+        );
+        showSuccess(
+          `Fixture saved to Supabase & published (${fixInitialStatus.toUpperCase()}): ${fixTeamA} vs ${fixTeamB} (${fixSportName})!`
+        );
+      }
+    } catch (err: any) {
+      showError(err?.message || "Unexpected error while creating fixture.");
+    } finally {
+      setIsCreatingFixture(false);
+    }
   };
 
   // Toggle lock state of fixture & sync with database
-  const toggleMatchLock = (matchId: string) => {
+  const toggleMatchLock = async (matchId: string) => {
+    const target = fixturesList.find((m) => m.id === matchId);
+    if (!target) return;
+
+    const newLocked = !target.is_locked;
+    const hasSupabaseUrl =
+      process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
+
+    if (hasSupabaseUrl && navigator.onLine) {
+      const { error } = await (supabase as any)
+        .from("matches")
+        .update({ is_locked: newLocked, updated_at: new Date().toISOString() })
+        .eq("id", matchId);
+
+      if (error) {
+        showError(`Failed to update lock status in Supabase: ${error.message}`);
+        return;
+      }
+    }
+
     setFixturesList((prev) =>
-      prev.map((m) => {
-        if (m.id === matchId) {
-          const newLocked = !m.is_locked;
-          addAuditLog(
-            newLocked ? "LOCK" : "UNLOCK",
-            "matches",
-            `${newLocked ? "Locked" : "Unlocked"} match ${m.id} (${m.team_a_code} vs ${m.team_b_code})`
-          );
-
-          const hasSupabaseUrl =
-            process.env.NEXT_PUBLIC_SUPABASE_URL &&
-            process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
-
-          if (hasSupabaseUrl && navigator.onLine) {
-            (supabase as any)
-              .from("matches")
-              .update({ is_locked: newLocked, updated_at: new Date().toISOString() })
-              .eq("id", matchId);
-          }
-
-          return { ...m, is_locked: newLocked };
-        }
-        return m;
-      })
+      prev.map((m) => (m.id === matchId ? { ...m, is_locked: newLocked } : m))
     );
-    setNotification(`Match lock state updated & synced to database.`);
-    setTimeout(() => setNotification(null), 3500);
+    await addAuditLog(
+      newLocked ? "LOCK" : "UNLOCK",
+      "matches",
+      `${newLocked ? "Locked" : "Unlocked"} match ${target.id} (${target.team_a_code} vs ${target.team_b_code})`,
+      matchId
+    );
+    showSuccess(`Match ${newLocked ? "locked" : "unlocked"} & synced to database.`);
   };
 
-  // Update match status (e.g. reopen completed match or finalize live match)
-  const updateMatchStatus = (
+  // Update match status (e.g. scheduled -> live -> completed)
+  const updateMatchStatus = async (
     matchId: string,
     newStatus: "scheduled" | "live" | "completed"
   ) => {
+    const target = fixturesList.find((m) => m.id === matchId);
+    if (!target) return;
+
+    const hasSupabaseUrl =
+      process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
+
+    if (hasSupabaseUrl && navigator.onLine) {
+      const { error } = await (supabase as any)
+        .from("matches")
+        .update({ status: newStatus, updated_at: new Date().toISOString() })
+        .eq("id", matchId);
+
+      if (error) {
+        showError(`Failed to update match status in Supabase: ${error.message}`);
+        return;
+      }
+    }
+
     setFixturesList((prev) =>
-      prev.map((m) => {
-        if (m.id === matchId) {
-          addAuditLog(
-            "UPDATE",
-            "matches",
-            `Changed status of match ${m.id} (${m.team_a_code} vs ${m.team_b_code}) to ${newStatus}`
-          );
-
-          const hasSupabaseUrl =
-            process.env.NEXT_PUBLIC_SUPABASE_URL &&
-            process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
-
-          if (hasSupabaseUrl && navigator.onLine) {
-            (supabase as any)
-              .from("matches")
-              .update({ status: newStatus, updated_at: new Date().toISOString() })
-              .eq("id", matchId);
-          }
-
-          return { ...m, status: newStatus };
-        }
-        return m;
-      })
+      prev.map((m) => (m.id === matchId ? { ...m, status: newStatus } : m))
     );
-    setNotification(
-      `Match status changed to ${newStatus.toUpperCase()}. Idempotent standings trigger automatically updated.`
+    await addAuditLog(
+      "UPDATE",
+      "matches",
+      `Changed status of match ${target.id} (${target.team_a_code} vs ${target.team_b_code}) to ${newStatus}`,
+      matchId
     );
-    setTimeout(() => setNotification(null), 4000);
+    showSuccess(
+      `Match status changed to ${newStatus.toUpperCase()} & synced to live portal!`
+    );
   };
 
-  // Add Sport handler
-  const handleAddSport = (e: React.FormEvent) => {
+  // Delete fixture (Super Admin / Admin)
+  const handleDeleteFixture = async (matchId: string) => {
+    const target = fixturesList.find((m) => m.id === matchId);
+    if (!target) return;
+
+    if (
+      !confirm(
+        `Delete fixture "${target.team_a_code} vs ${target.team_b_code} (${target.sport_name})"? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+
+    const hasSupabaseUrl =
+      process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
+
+    if (hasSupabaseUrl && navigator.onLine) {
+      const { error } = await (supabase as any)
+        .from("matches")
+        .delete()
+        .eq("id", matchId);
+
+      if (error) {
+        showError(`Failed to delete fixture in Supabase: ${error.message}`);
+        return;
+      }
+    }
+
+    setFixturesList((prev) => prev.filter((m) => m.id !== matchId));
+    await addAuditLog(
+      "DELETE",
+      "matches",
+      `Deleted match ${target.id} (${target.team_a_code} vs ${target.team_b_code})`,
+      matchId
+    );
+    showSuccess(`Fixture deleted from database.`);
+  };
+
+  // Add Sport handler (persists to Supabase public.sports)
+  const handleAddSport = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSportName.trim()) return;
 
+    const cleanName = newSportName.trim();
     const newSp: Sport = {
-      id: `sport-${Date.now()}`,
-      name: newSportName.trim(),
+      id: `sport-${cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now().toString().slice(-4)}`,
+      name: cleanName,
       category_group: newSportCategory,
       gender_category: newSportGender,
       format_type: newSportFormat,
@@ -583,19 +875,35 @@ export default function AdminPage() {
       rules_summary: newSportRulesSummary.trim() || null,
     };
 
+    const hasSupabaseUrl =
+      process.env.NEXT_PUBLIC_SUPABASE_URL &&
+      process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
+
+    if (hasSupabaseUrl && navigator.onLine) {
+      const { error } = await (supabase as any).from("sports").insert(newSp);
+      if (error) {
+        showError(`Failed to save sport to Supabase: ${error.message}`);
+        return;
+      }
+    }
+
     setSportsList((prev) => [...prev, newSp]);
-    addAuditLog("INSERT", "sports", `Added new sports event: ${newSp.name} (${newSp.category_group}, ${newSp.gender_category})`);
+    await addAuditLog(
+      "INSERT",
+      "sports",
+      `Added new sports event: ${newSp.name} (${newSp.category_group}, ${newSp.gender_category})`,
+      newSp.id
+    );
     setNewSportName("");
     setNewSportRulesSummary("");
-    setNotification(`New event "${newSp.name}" added to official AITM sports calendar!`);
-    setTimeout(() => setNotification(null), 4000);
+    showSuccess(`New event "${newSp.name}" saved to database & official AITM sports calendar!`);
   };
 
   // Save Podium results handler (Consistent 10 / 8 / 5 points across all sports)
   const handleSavePodium = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!goldAthlete.trim() || !silverAthlete.trim() || !bronzeAthlete.trim()) {
-      alert("Please fill in athlete / team captain names for all three podium positions.");
+      showError("Please fill in athlete / team captain names for all three podium positions.");
       return;
     }
 
@@ -609,7 +917,7 @@ export default function AdminPage() {
         sport_id: sportId,
         bracket_gender: podiumGender,
         position: 1,
-        department_id: goldDept,
+        department_id: deptIdByCode[goldDept.toUpperCase()] || goldDept,
         athlete_name: goldAthlete.trim(),
         mark_metric: goldMark.trim() || null,
         awarded_pts: 10,
@@ -618,7 +926,7 @@ export default function AdminPage() {
         sport_id: sportId,
         bracket_gender: podiumGender,
         position: 2,
-        department_id: silverDept,
+        department_id: deptIdByCode[silverDept.toUpperCase()] || silverDept,
         athlete_name: silverAthlete.trim(),
         mark_metric: silverMark.trim() || null,
         awarded_pts: 8,
@@ -627,7 +935,7 @@ export default function AdminPage() {
         sport_id: sportId,
         bracket_gender: podiumGender,
         position: 3,
-        department_id: bronzeDept,
+        department_id: deptIdByCode[bronzeDept.toUpperCase()] || bronzeDept,
         athlete_name: bronzeAthlete.trim(),
         mark_metric: bronzeMark.trim() || null,
         awarded_pts: 5,
@@ -640,21 +948,27 @@ export default function AdminPage() {
 
     if (hasSupabaseUrl && navigator.onLine) {
       try {
-        await (supabase as any).from("podium_results").upsert(podiumEntries, {
+        const { error } = await (supabase as any).from("podium_results").upsert(podiumEntries, {
           onConflict: "sport_id,bracket_gender,position",
         });
-      } catch (err) {
-        console.error("Failed to sync podium results to Supabase:", err);
+        if (error) {
+          showError(`Failed to sync podium results to Supabase: ${error.message}`);
+          return;
+        }
+      } catch (err: any) {
+        showError(err?.message || "Failed to sync podium results to Supabase.");
+        return;
       }
     }
 
-    addAuditLog(
+    await addAuditLog(
       "INSERT",
       "podium_results",
-      `Recorded podium for ${podiumSport} (${podiumGender}): 1st ${goldDept} (${goldAthlete} - 10 pts), 2nd ${silverDept} (${silverAthlete} - 8 pts), 3rd ${bronzeDept} (${bronzeAthlete} - 5 pts)`
+      `Recorded podium for ${podiumSport} (${podiumGender}): 1st ${goldDept} (${goldAthlete} - 10 pts), 2nd ${silverDept} (${silverAthlete} - 8 pts), 3rd ${bronzeDept} (${bronzeAthlete} - 5 pts)`,
+      sportId
     );
 
-    setNotification(
+    showSuccess(
       `Podium results for ${podiumSport} (${podiumGender}) recorded! Gold = 10 pts, Silver = 8 pts, Bronze = 5 pts credited to departmental tallies.`
     );
     setGoldAthlete("");
@@ -663,7 +977,6 @@ export default function AdminPage() {
     setSilverMark("");
     setBronzeAthlete("");
     setBronzeMark("");
-    setTimeout(() => setNotification(null), 5000);
   };
 
   const pendingRequests = officialsList.filter((o) => o.approval_status === "pending");
@@ -772,7 +1085,44 @@ export default function AdminPage() {
       {/* Supabase Cloud Connection & Setup Helper */}
       <SupabaseStatusBanner mode="admin" />
 
-      {/* Notification Toast */}
+      {/* Active Supabase Auth Warning Banner if unauthenticated */}
+      {hasAuthSession === false && (
+        <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-extrabold">Official Supabase Sign-In Required for Live Database Changes:</span>{" "}
+              You are viewing this page without an active authenticated Supabase session. Creating fixtures or updating live statuses will be blocked by Row-Level Security until you sign in.
+            </div>
+          </div>
+          <Link
+            href="/login"
+            className="shrink-0 px-3 py-1.5 rounded-lg bg-[#1E3A8A] text-white font-bold hover:bg-[#1E3A8A]/90 transition-colors text-center"
+          >
+            Sign In as Official
+          </Link>
+        </div>
+      )}
+
+      {/* Error Toast / Alert */}
+      {errorNotification && (
+        <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-300 text-xs font-bold text-rose-900 flex items-start justify-between gap-3 animate-in fade-in-50 duration-150">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <span>{errorNotification}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorNotification(null)}
+            className="text-rose-700 hover:text-rose-950 shrink-0"
+            aria-label="Dismiss error"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Success Notification Toast */}
       {notification && (
         <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-center gap-2 animate-in fade-in-50 duration-150">
           <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
@@ -937,6 +1287,7 @@ export default function AdminPage() {
                 <label className="block font-bold text-[#0F172A] mb-1">Campus Venue:</label>
                 <input
                   type="text"
+                  required
                   value={fixVenue}
                   onChange={(e) => setFixVenue(e.target.value)}
                   className="w-full h-9 px-3 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0]"
@@ -946,21 +1297,34 @@ export default function AdminPage() {
               <div>
                 <label className="block font-bold text-[#0F172A] mb-1">Scheduled Date & Time:</label>
                 <input
-                  type="text"
+                  type="datetime-local"
+                  required
                   value={fixDateTime}
                   onChange={(e) => setFixDateTime(e.target.value)}
-                  placeholder="2026-11-23 14:00"
                   className="w-full h-9 px-3 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] font-mono"
                 />
               </div>
 
-              <div className="flex items-end">
+              <div className="grid grid-cols-2 gap-2 items-end">
+                <div>
+                  <label className="block font-bold text-[#0F172A] mb-1">Initial Status:</label>
+                  <select
+                    value={fixInitialStatus}
+                    onChange={(e) => setFixInitialStatus(e.target.value as "scheduled" | "live")}
+                    className="w-full h-9 px-2 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] font-bold"
+                  >
+                    <option value="scheduled">Scheduled</option>
+                    <option value="live">Live Now</option>
+                  </select>
+                </div>
+
                 <button
                   type="submit"
-                  className="w-full h-9 px-4 rounded-lg bg-[#1E3A8A] hover:bg-[#1E3A8A]/90 text-white font-bold transition-colors flex items-center justify-center gap-1.5 shadow-sm"
+                  disabled={isCreatingFixture}
+                  className="w-full h-9 px-3 rounded-lg bg-[#1E3A8A] hover:bg-[#1E3A8A]/90 disabled:opacity-60 text-white font-bold transition-colors flex items-center justify-center gap-1.5 shadow-sm"
                 >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Create Match Fixture</span>
+                  <Plus className="w-3.5 h-3.5 shrink-0" />
+                  <span>{isCreatingFixture ? "Saving..." : "Create"}</span>
                 </button>
               </div>
             </form>
@@ -974,7 +1338,7 @@ export default function AdminPage() {
                   Active Fixtures & Unlocking Control
                 </h3>
                 <p className="text-xs text-[#475569] mt-0.5">
-                  Super Admins can unlock completed matches to allow ground scorers to correct score entries.
+                  Change match status to &ldquo;Live&rdquo; to broadcast on the Live Match Center, or unlock completed matches to allow corrections.
                 </p>
               </div>
             </div>
@@ -989,11 +1353,18 @@ export default function AdminPage() {
                     <th className="py-3 px-3">Venue</th>
                     <th className="py-3 px-3">Time</th>
                     <th className="py-3 px-3 text-center">Status</th>
-                    <th className="py-3 px-4 text-right">Lock Control</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E2E8F0]">
-                  {fixturesList.length === 0 ? (
+                  {isLoadingFixtures ? (
+                    <tr>
+                      <td colSpan={7} className="py-10 text-center text-slate-500">
+                        <div className="inline-block animate-spin rounded-full h-5 w-5 border-2 border-[#1E3A8A] border-r-transparent mb-2"></div>
+                        <div className="text-xs font-semibold">Loading fixtures from Supabase...</div>
+                      </td>
+                    </tr>
+                  ) : fixturesList.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="py-10 text-center text-slate-500">
                         <div className="font-semibold text-slate-700">No fixtures currently scheduled</div>
@@ -1040,23 +1411,33 @@ export default function AdminPage() {
                           </select>
                         </td>
                         <td className="py-3.5 px-4 text-right">
-                          {f.is_locked ? (
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            {f.is_locked ? (
+                              <button
+                                onClick={() => toggleMatchLock(f.id)}
+                                className="px-2.5 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-bold transition-colors inline-flex items-center gap-1"
+                              >
+                                <Unlock className="w-3 h-3 text-amber-800" />
+                                <span>Unlock</span>
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => toggleMatchLock(f.id)}
+                                className="px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors inline-flex items-center gap-1"
+                              >
+                                <Lock className="w-3 h-3 text-slate-500" />
+                                <span>Lock</span>
+                              </button>
+                            )}
                             <button
-                              onClick={() => toggleMatchLock(f.id)}
-                              className="px-2.5 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-bold transition-colors inline-flex items-center gap-1"
+                              onClick={() => handleDeleteFixture(f.id)}
+                              className="p-1.5 rounded bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 transition-colors"
+                              title="Delete fixture"
+                              aria-label="Delete fixture"
                             >
-                              <Unlock className="w-3 h-3 text-amber-800" />
-                              <span>Unlock</span>
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
-                          ) : (
-                            <button
-                              onClick={() => toggleMatchLock(f.id)}
-                              className="px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors inline-flex items-center gap-1"
-                            >
-                              <Lock className="w-3 h-3 text-slate-500" />
-                              <span>Lock</span>
-                            </button>
-                          )}
+                          </div>
                         </td>
                       </tr>
                     ))

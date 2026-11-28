@@ -56,6 +56,7 @@ export default function FixturesPage() {
   const [genderFilter, setGenderFilter] = useState<"all" | "boys" | "girls">("all");
   const [sportFilter, setSportFilter] = useState<string>("all");
   const [deptFilter, setDeptFilter] = useState<string>("all");
+  const [sportsOptions, setSportsOptions] = useState(AITM_SPORTS);
 
   // Sync pinned department filter when selectedDeptCode changes
   useEffect(() => {
@@ -65,6 +66,23 @@ export default function FixturesPage() {
   }, [selectedDeptCode]);
 
   useEffect(() => {
+    async function loadSportsOptions() {
+      try {
+        const hasSupabaseUrl =
+          process.env.NEXT_PUBLIC_SUPABASE_URL &&
+          process.env.NEXT_PUBLIC_SUPABASE_URL.startsWith("http");
+        if (hasSupabaseUrl) {
+          const { data } = await supabase
+            .from("sports")
+            .select("*")
+            .order("name", { ascending: true });
+          if (data && data.length > 0) {
+            setSportsOptions(data as any);
+          }
+        }
+      } catch {}
+    }
+
     async function loadFixtures() {
       try {
         const hasSupabaseUrl =
@@ -91,42 +109,61 @@ export default function FixturesPage() {
               winner:departments!matches_winner_id_fkey(short_code),
               mvp_player:players(id, full_name)
             `)
-            .order("scheduled_at", { ascending: false });
+            .order("scheduled_at", { ascending: true });
 
-          if (!error && data) {
-            const mapped: FixtureItem[] = data.map((m: any) => ({
-              id: m.id,
-              sport_id: m.sport_id,
-              sport_name: m.sport?.name || "Sport",
-              bracket_gender: m.bracket_gender,
-              stage_label: m.stage_label,
-              venue: m.venue,
-              scheduled_at: m.scheduled_at,
-              reporting_mins_before: m.sport?.reporting_mins_before || 15,
-              status: m.status,
-              team_a_code: m.team_a?.short_code || "TBD",
-              team_a_name: m.team_a?.name || "Team A",
-              team_a_color: m.team_a?.badge_color || "#1E3A8A",
-              team_a_score: m.team_a_score,
-              team_b_code: m.team_b?.short_code || "TBD",
-              team_b_name: m.team_b?.name || "Team B",
-              team_b_color: m.team_b?.badge_color || "#DC2626",
-              team_b_score: m.team_b_score,
-              winner_code: m.winner?.short_code,
-              mvp_player_id: m.mvp_player?.id,
-              mvp_player_name: m.mvp_player?.full_name,
-              result_note: m.result_note,
-            }));
+          if (error) {
+            console.error("FixturesPage failed to fetch matches:", error);
+            setFixtures([]);
+          } else if (data) {
+            const statusWeight: Record<string, number> = {
+              live: 0,
+              scheduled: 1,
+              completed: 2,
+            };
+            const mapped: FixtureItem[] = data
+              .map((m: any) => ({
+                id: m.id,
+                sport_id: m.sport_id,
+                sport_name: m.sport?.name || "Sport",
+                bracket_gender: m.bracket_gender,
+                stage_label: m.stage_label || "League Match",
+                venue: m.venue || "Main Campus Ground",
+                scheduled_at: m.scheduled_at,
+                reporting_mins_before: m.sport?.reporting_mins_before || 15,
+                status: m.status,
+                team_a_code: m.team_a?.short_code || "TBD",
+                team_a_name: m.team_a?.name || "Team A",
+                team_a_color: m.team_a?.badge_color || "#1E3A8A",
+                team_a_score: m.team_a_score,
+                team_b_code: m.team_b?.short_code || "TBD",
+                team_b_name: m.team_b?.name || "Team B",
+                team_b_color: m.team_b?.badge_color || "#DC2626",
+                team_b_score: m.team_b_score,
+                winner_code: m.winner?.short_code,
+                mvp_player_id: m.mvp_player?.id,
+                mvp_player_name: m.mvp_player?.full_name,
+                result_note: m.result_note,
+              }))
+              .sort((a: FixtureItem, b: FixtureItem) => {
+                const wA = statusWeight[a.status] ?? 3;
+                const wB = statusWeight[b.status] ?? 3;
+                if (wA !== wB) return wA - wB;
+                const tA = new Date(a.scheduled_at).getTime() || 0;
+                const tB = new Date(b.scheduled_at).getTime() || 0;
+                return a.status === "completed" ? tB - tA : tA - tB;
+              });
             setFixtures(mapped);
           } else {
             setFixtures([]);
           }
         }
-      } catch {
+      } catch (err) {
+        console.error("FixturesPage unexpected error:", err);
         setFixtures([]);
       }
     }
 
+    loadSportsOptions();
     loadFixtures();
 
     // Supabase Realtime subscription for live fixture and score updates
@@ -313,7 +350,7 @@ export default function FixturesPage() {
               className="w-full h-9 px-3 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] text-xs font-semibold text-[#0F172A] focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]/20"
             >
               <option value="all">All Sports Events</option>
-              {AITM_SPORTS.map((sport) => (
+              {sportsOptions.map((sport) => (
                 <option key={sport.id} value={sport.id}>
                   {sport.name} ({sport.category_group.toUpperCase()})
                 </option>
